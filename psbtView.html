@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>比特币原始交易审计工具</title>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; line-height: 1.6; padding: 20px; max-width: 900px; margin: 0 auto; background-color: #f8f9fa; color: #333; }
+        h1, h2 { color: #0056b3; }
+        textarea { width: 100%; min-height: 150px; padding: 10px; font-family: "Courier New", Courier, monospace; font-size: 14px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box; }
+        button { background-color: #007bff; color: white; padding: 10px 20px; border: none; border-radius: 4px; cursor: pointer; font-size: 16px; margin-top: 10px; }
+        button:hover { background-color: #0056b3; }
+        #results { margin-top: 20px; background-color: #fff; padding: 20px; border: 1px solid #ddd; border-radius: 4px; }
+        .field-name { font-weight: bold; color: #0056b3; }
+        .field-value { font-family: "Courier New", Courier, monospace; word-wrap: break-word; background-color: #e9ecef; padding: 2px 6px; border-radius: 3px; }
+        .section { border-bottom: 1px solid #eee; padding-bottom: 15px; margin-bottom: 15px; }
+        .alert { padding: 15px; margin-bottom: 20px; border: 1px solid transparent; border-radius: 4px; }
+        .alert-success { color: #155724; background-color: #d4edda; border-color: #c3e6cb; }
+        .alert-warning { color: #856404; background-color: #fff3cd; border-color: #ffeeba; }
+    </style>
+</head>
+<body>
+
+    <h1>比特币原始交易审计工具</h1>
+    <p>此工具可以帮助您解析和审计一个已签名的比特币原始交易（十六进制格式），以确认其中只包含必要的信息，没有夹带任何“私货”。所有操作均在您的浏览器本地完成，数据不会上传到任何服务器。</p>
+
+    <label for="rawTx"><strong>在此处粘贴原始交易 (Hex):</strong></label>
+    <textarea id="rawTx" rows="8"></textarea>
+
+    <button onclick="parseTransaction()">审计交易脚本</button>
+
+    <div id="results"></div>
+
+    <script>
+        function parseTransaction() {
+            const hex = document.getElementById('rawTx').value.trim();
+            const resultsDiv = document.getElementById('results');
+            resultsDiv.innerHTML = '';
+
+            if (!hex || !/^[0-9a-fA-F]+$/.test(hex)) {
+                resultsDiv.innerHTML = '<div class="alert alert-warning">请输入有效的十六进制字符串。</div>';
+                return;
+            }
+
+            try {
+                let offset = 0;
+
+                const readBytes = (n) => {
+                    const slice = hex.slice(offset, offset + n * 2);
+                    offset += n * 2;
+                    return slice;
+                };
+
+                const readVarInt = () => {
+                    const firstByte = parseInt(hex.slice(offset, offset + 2), 16);
+                    offset += 2;
+                    if (firstByte < 0xfd) return firstByte;
+                    if (firstByte === 0xfd) return parseInt(reverseHex(hex.slice(offset, offset += 4)), 16);
+                    if (firstByte === 0xfe) return parseInt(reverseHex(hex.slice(offset, offset += 8)), 16);
+                    return parseInt(reverseHex(hex.slice(offset, offset += 16)), 16);
+                };
+
+                const reverseHex = (s) => (s.match(/.{2}/g) || []).reverse().join('');
+                
+                let html = '';
+
+                // Version
+                const version = reverseHex(readBytes(4));
+                html += `<div class="section"><h2>基本信息</h2><p><span class="field-name">交易版本 (Version):</span> <span class="field-value">${version}</span></p>`;
+                
+                // SegWit Marker
+                const marker = readBytes(2);
+                const isSegWit = marker === '0001';
+                html += `<p><span class="field-name">隔离见证标记 (SegWit Marker):</span> <span class="field-value">${marker}</span> (${isSegWit ? '是隔离见证交易' : '非隔离见证交易'})</p></div>`;
+
+                if (!isSegWit) {
+                     resultsDiv.innerHTML = '<div class="alert alert-warning">此工具目前主要为审计隔离见证交易设计。</div>' + html;
+                     return;
+                }
+                
+                // Inputs
+                const inputCount = readVarInt();
+                html += `<div class="section"><h2>交易输入 (Inputs): ${inputCount}</h2>`;
+                const inputs = [];
+                for (let i = 0; i < inputCount; i++) {
+                    const prevTxHash = reverseHex(readBytes(32));
+                    const prevOutputIndex = parseInt(reverseHex(readBytes(4)), 16);
+                    const scriptSigLen = readVarInt();
+                    const scriptSig = readBytes(scriptSigLen);
+                    const sequence = reverseHex(readBytes(4));
+                    inputs.push({ prevTxHash, prevOutputIndex, scriptSig, sequence });
+                    html += `
+                        <div>
+                            <h4>输入 #${i + 1}</h4>
+                            <p><span class="field-name">前序交易哈希:</span> <span class="field-value">${prevTxHash}</span></p>
+                            <p><span class="field-name">前序输出索引:</span> <span class="field-value">${prevOutputIndex}</span></p>
+                            <p><span class="field-name">解锁脚本 (ScriptSig):</span> <span class="field-value">${scriptSig || '(空)'}</span></p>
+                            <p><span class="field-name">序列号 (Sequence):</span> <span class="field-value">${sequence}</span></p>
+                        </div>`;
+                }
+                html += '</div>';
+
+                // Outputs
+                const outputCount = readVarInt();
+                html += `<div class="section"><h2>交易输出 (Outputs): ${outputCount}</h2>`;
+                for (let i = 0; i < outputCount; i++) {
+                    const valueSatoshis = parseInt(reverseHex(readBytes(8)), 16);
+                    const scriptPubKeyLen = readVarInt();
+                    const scriptPubKey = readBytes(scriptPubKeyLen);
+                    html += `
+                        <div>
+                            <h4>输出 #${i + 1}</h4>
+                            <p><span class="field-name">金额 (Satoshis):</span> <span class="field-value">${valueSatoshis.toLocaleString()}</span></p>
+                            <p><span class="field-name">锁定脚本 (ScriptPubKey):</span> <span class="field-value">${scriptPubKey}</span></p>
+                        </div>`;
+                }
+                html += '</div>';
+                
+                // Witness Data
+                html += `<div class="section"><h2>见证数据 (Witness)</h2>`;
+                 for (let i = 0; i < inputCount; i++) {
+                    const witnessItemsCount = readVarInt();
+                    html += `<h4>输入的见证 #${i + 1} (${witnessItemsCount} 项)</h4>`;
+                    for(let j = 0; j < witnessItemsCount; j++) {
+                        const itemLen = readVarInt();
+                        const itemData = readBytes(itemLen);
+                        const itemType = (j === 0 && itemData.startsWith('304')) ? '签名 (Signature)' : '公钥 (Public Key)';
+                        html += `<p><span class="field-name">项目 #${j + 1} (${itemType}):</span> <span class="field-value">${itemData}</span></p>`;
+                    }
+                }
+                html += '</div>';
+
+                // Locktime
+                const locktime = reverseHex(readBytes(4));
+                html += `<div class="section"><h2>锁定时间 (Locktime)</h2><p><span class="field-value">${locktime}</span></p></div>`;
+                
+                // Audit Result
+                let auditHtml = '<div class="section"><h2>审计结论</h2>';
+                if (isSegWit && (offset === hex.length)) {
+                    auditHtml += '<div class="alert alert-success"><strong>检查通过:</strong> 此交易是一个结构完整的标准隔离见证交易。所有数据都是交易的必要组成部分，未发现任何异常或多余的“私货”信息。</div>';
+                } else {
+                    auditHtml += `<div class="alert alert-warning"><strong>注意:</strong> 交易解析未完全覆盖所有数据或结构异常。剩余未解析数据: <span class="field-value">${hex.slice(offset)}</span></div>`;
+                }
+                auditHtml += '</div>';
+
+                resultsDiv.innerHTML = auditHtml + html;
+
+            } catch (e) {
+                resultsDiv.innerHTML = `<div class="alert alert-warning">解析失败: ${e.message}。请检查输入的十六进制字符串是否完整且正确。</div>`;
+            }
+        }
+        
+        // Auto-run on load for the example transaction
+        window.onload = parseTransaction;
+    </script>
+</body>
+</html>

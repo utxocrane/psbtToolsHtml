@@ -1,0 +1,441 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>PSBT for local browser</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 20px; }
+    input, select, button, textarea { font-size: 14px; padding: 6px; border-radius: 4px; border: 1px solid #ccc; }
+    textarea { width: 100%; box-sizing: border-box; height: 120px; }
+    button { cursor: pointer; background-color: #007bff; color: white; border: none; }
+    button:disabled { background-color: #ccc; cursor: not-allowed; }
+    .row { display: flex; gap: 10px; margin-bottom: 8px; flex-wrap: wrap; align-items: flex-end; }
+    .col { flex: 1; min-width: 240px; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .small { font-size: 12px; color: #555; margin-top: 4px; }
+    .outrow { display: grid; grid-template-columns: 1.5fr 1fr auto; gap: 8px; margin-bottom: 8px; align-items: center; }
+    .box { border: 1px solid #ddd; padding: 12px; border-radius: 8px; margin-bottom: 16px; }
+    .warn { color: #b00; font-weight: bold; }
+    .ok { color: #060; font-weight: bold; }
+    .status-text { min-height: 1.2em; } /* Prevent layout shifts */
+  </style>
+  <script src=https://cdn.bootcdn.net/ajax/libs/i18next/25.4.2/i18next.min.js crossorigin=anonymous integrity=sha384-6ueXk9h2hish0TqR/wNWiphOUcZCZ88t19dz34j2xmQoSaYKCkUyMNw9rVzqg8Ks></script>
+  <script src=https://cdn.bootcdn.net/ajax/libs/vue/3.4.29/vue.global.prod.js crossorigin=anonymous integrity=sha384-4uD/Js/LgyB971sxEvEjDxkrmiGA3tpSb18IadRH8hUGmcij5fIyWfw1wpH3llGA></script>
+  <script src=bitcoinjs-lib.iife.min.js></script><!--npx esbuild min version from bitcoinjs-lib,wish 2 replace with cdn@cn -->
+  <!--script src=buffer.iife.js></script-->
+  <script src=locales.js></script>
+</head>
+<body>
+
+<div id=app>
+   <h2 class="warn">{{ t('warningHeader') }}</h2>
+  <div class="box">
+    <div class="box">
+      <div class="col">
+        <label><b>API：</b></label>
+		<select v-model="apiBase">
+          <option v-for="(a,u) in apiInfo" :value="u">{{a.net+' '+u}}</option>
+        </select>
+		
+		{{ t('networkLabel') }}{{network}}
+		<label><b>{{ t('langLabel') }}</b></label><select v-model="currentLang">
+      <option value="zh">简中</option>
+      <option value="en">English</option>
+    </select>
+      </div>
+    </div>
+
+    <label><b>{{t('inputAddressLabel')}}</b></label>
+    <textarea v-model="addrList" :placeholder="t('placeholderAddressPerLine')"></textarea>
+	<input id=forceFetch2Rbf type=checkbox v-model=forceFetch2Rbf /><label for=forceFetch2Rbf :title="t('forceRbfTitle')"><b>{{ t('forceRbfLabel') }}</b></label><br>
+	<textarea v-show=forceFetch2Rbf v-model="rbfTxidList" :placeholder="t('placeholderRBF')"></textarea>
+    <button @click="fetchUTXOs" :disabled="isFetching">
+      {{ isFetching ? t('fetching') : t('fetchUtxoBtn') }}
+    </button>
+    <div class="small status-text" :class="{ 'warn': utxoStatus.startsWith(t('error_prefix')) }">{{ utxoStatus }}</div>
+
+    <div>
+		<table border="1" cellspacing="0" cellpadding="8">
+		  <thead>
+			<tr>
+			  <th>{{ t('tableHeaderUse') }}</th>
+			  <th>{{ t('tableHeaderTime') }}</th>
+			  <th>{{ t('tableHeaderAmount') +' '+apiInfo[apiBase].sat}}</th>
+			  <th>{{ t('tableHeaderTxid') }}</th>
+			  <th>{{ t('tableHeaderAddress') }}</th>
+			</tr>
+		  </thead>
+		  <tbody>
+			<tr v-for="u in utxos">
+			  <td><input type="checkbox" v-model=u.selected /></td>
+			  <td>{{u.status.confirmed?(new Date(u.status.block_time*1000).toLocaleString() +'\n#'+u.status.block_height) : t('unconfirmed')}}</td>
+			  <td>{{u.value}}<br>({{u.value/100000000 +' '+ network}})</td>
+			  <td><a href=# @click="openLink(apiInfo[apiBase].txUrl+u.txid)">{{u.txid+' #'+u.vout}}</a></td>
+			  <td><a href=# @click="openLink(apiInfo[apiBase].addrUrl+u.address)">{{u.address}}</a></td>
+			</tr>
+		  </tbody>
+		</table>
+      <div class="col"><b>{{ t('totalInputAmount') }}</b> <span class="ok">{{ inputTotal +' '+ apiInfo[apiBase].sat}} ({{inputTotal/100000000 +' ' +network}}) {{ t('countLabel') }}{{utxoCount}}</span></div>
+    </div>
+  </div>
+
+  <div class="box">
+    <label><b>{{ t('targetOutputLabel') }}</b></label>
+    <div v-for="(output, index) in outputs" :key="index" class="outrow">
+      <input v-model.trim="output.address" class="mono" :placeholder="t('placeholderTargetAddress')" />
+      <input v-model.number="output.value" type="number" :placeholder="t('placeholderAmountSat')" />
+      <button @click="removeOutput(index)" :disabled="outputs.length <= 1">{{ t('deleteBtn') }}</button>
+    </div>
+    <button @click="addOutput">{{ t('addOutputBtn') }}</button>
+
+    <div class="row" style="margin-top: 12px;">
+      <div><b>{{ t('totalOutputAmount') }}</b> <span :class="{ 'ok': outputTotal > 0, 'warn': outputTotal === 0 }">{{ outputTotal.toLocaleString() }}</span></div>
+      <div>
+        <span>
+		  {{ t('tx')+t('size') + vbytes + 'vb, ' + t('fee') + ': '+ feeAmount + apiInfo[apiBase].sat + t('feeRate')+': ' + feeRate+' '+apiInfo[apiBase].sat + '/vb ,'+t('min')+t('feeRate')+minFeeRate+apiInfo[apiBase].sat+'/vb, '+ t('min')+t('fee')+Math.ceil(vbytes * minFeeRate) }}
+        </span>
+      </div>
+    </div>
+  </div>
+
+  <div class="box">
+    <button @click="buildPSBT" :disabled="utxoCount === 0 || outputs[0].address.length<20 || isBuilding">
+      {{ isBuilding ? t('generating') : (feeAmount > 100 ? t('generatePsbtBtnHighFee', { feeAmount: feeAmount }) : t('generatePsbtBtn')) }}
+    </button>
+    <div class="small status-text" :class="{ 'warn': buildStatus.startsWith(t('error_prefix')), 'ok': buildStatus.includes(t('build_success')) }">{{ buildStatus }}</div>
+    <label><b>{{ t('psbtHexLabel') }}</b></label>
+    <textarea v-model="psbtBase64" class="mono" :placeholder="t('placeholderPsbtHex')" readonly></textarea>
+	<label><b>RAW Hex</b></label>
+	<textarea v-model="rawHex" class="mono" readonly></textarea>
+	<a v-show=apiInfo[apiBase].viewUrl href=# @click="openLink(apiInfo[apiBase].viewUrl+'#tx='+psbtHex)">{{ t('txVsize') }}</a>，
+	<a v-show=apiInfo[apiBase].viewUrl href=# @click="openLink(apiInfo[apiBase].viewUrl)">{{ t('txPreviewLink') }}</a>，<a v-if=apiInfo[apiBase].pushUrl href=# @click="openLink(apiInfo[apiBase].pushUrl)">{{ t('broadcastTxLink') }}</a><br>
+  </div>
+  <pre>
+  {{t('note')}}
+  </pre>
+</div>
+
+<!--script type="module"-->
+<script>
+  const { createApp, ref, reactive, computed, watch } = Vue;
+  //import * as bitcoin from 'https://cdn.jsdelivr.net/npm/bitcoinjs-lib@6.1.6/+esm';
+  //import {Buffer} from "./buffer.iife.js"// "https://cdn.jsdelivr.net/npm/buffer@6.0.3/+esm" //buffer.iife.js
+  //const { Buffer } = bufferModule;
+  function hexToBytes(hex) {//用于替换Buffer
+    if (typeof hex !== 'string' ||
+        hex.length % 2 !== 0 ||
+        !/^[0-9a-f]*$/i.test(hex)) {
+        throw new Error('无效的十六进制字符串')
+    }
+
+    const bytes = new Uint8Array(hex.length / 2)
+
+    for (let i = 0; i < bytes.length; i++)
+        bytes[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16)
+
+    return bytes
+  }
+
+  function getAddressType(address, network = bitcoin.networks.bitcoin) {
+  // Base58Check: P2PKH / P2SH
+  try {
+    const decoded = bitcoin.address.fromBase58Check(address);
+    if (decoded.version === network.pubKeyHash) return "p2pkh";
+    if (decoded.version === network.scriptHash) return "p2sh";
+    return "unknown";
+  } catch (_) {
+    // Bech32: P2WPKH / P2WSH
+    try {
+      const decoded = bitcoin.address.fromBech32(address);
+      if (decoded.prefix !== network.bech32) return "unknown";
+      if (decoded.version === 0) {
+        if (decoded.data.length === 20) return "p2wpkh";
+        if (decoded.data.length === 32) return "p2wsh";
+      }
+      return "unknown";
+    } catch (_) {
+      // Bech32m: P2TR
+      try {
+        const decoded = bitcoin.address.fromBech32m(address);
+        if (decoded.prefix !== network.bech32) return "unknown";
+        if (decoded.version === 1 && decoded.data.length === 32) return "p2tr";
+        return "unknown";
+      } catch (_) {
+        return "unknown";
+      }
+    }
+  }
+  }
+  const addressWitness={p2pkh:0,p2sh:0,p2wpkh:1,p2wsh:1,p2tr:1} // 四种地址类型是否addressWitness
+
+  // --- 增强1：浏览器语言自动检测 ---
+  const supportedLangs = ['zh', 'en'];
+  const browserLang = navigator.language.split('-')[0]; // 例如从 'zh-TW' 获取 'zh'
+  const initialLang = supportedLangs.includes(browserLang) ? browserLang : 'zh'; // 如果支持则使用，否则默认 'zh'
+
+  const apiInfo={//API配置区
+	'https://blockstream.info/api':{net:'BTC',sat:'sat',viewUrl:'https://mempool.space/tx/preview',pushUrl:'https://blockstream.info/tx/push',txUrl:'https://blockstream.info/tx/'}
+	,'https://litecoinspace.org/api':{net:'LTC',sat:'lit',pushUrl:'https://litecoinspace.org/tx/push',txUrl:'https://litecoinspace.org/tx/',addrUrl:'https://litecoinspace.org/address/'}
+	,'https://mempool.space/api':{net:'BTC',sat:'sat',viewUrl:'https://mempool.space/tx/preview',pushUrl:'https://mempool.space/tx/push',txUrl:'https://mempool.space/tx/'}//for test
+  }
+  const App = {
+    setup() {
+      // --- i18n 响应式集成 ---
+      const t = ref(i18next.t);
+      const currentLang = ref((navigator.language || navigator.userLanguage).substr(0,2)) // ref(i18next.language);
+      
+      document.documentElement.lang = currentLang.value;
+      document.title = t.value('title');
+
+      // --- 增强2：使用 watch 修复语言切换 Bug ---
+      watch(currentLang, async (newLang) => {
+        if (newLang !== i18next.language) {
+          await i18next.changeLanguage(newLang);
+          t.value = i18next.t; // 更新 t 函数的引用以触发Vue的响应式更新
+          document.documentElement.lang = newLang;
+          document.title = t.value('title');
+        }
+      });
+
+      // --- 原始响应式状态定义 ---
+      const network = ref('BTC');
+      const apiBase = ref('https://mempool.space/api');//测试
+	  //const apiBase = ref('https://blockstream.info/api')//
+      const addrList = ref('');//初始地址列表
+	  const rbfTxidList=ref('')//替换交易
+      const utxos = ref([]);
+	  const forceFetch2Rbf=ref(false);
+      const outputs = reactive([{ address: '', value: null }]);
+      const psbtHex = ref(''),psbtBase64=ref(''),rawHex=ref('');
+
+      const isFetching = ref(false);
+      const utxoStatus = ref('');
+      const isBuilding = ref(false);
+      const buildStatus = ref('');
+
+      const bitcoinNetworks = {
+        BTC: bitcoin.networks.bitcoin,
+		LTC: {
+			  messagePrefix: '\x19Litecoin Signed Message:\n',
+			  bech32: 'ltc',
+			  bip32: {
+				public: 0x019da462,
+				private: 0x019d9cfe
+			  },
+			  pubKeyHash: 0x30,
+			  scriptHash: 0x32,
+			  wif: 0xb0
+		  }
+      };
+	  
+	  const minFeeRate=ref(0)
+
+	  watch(apiBase, (newApiBase) => {//set network by API url
+		if (newApiBase.indexOf('litecoin')>0) {
+          network.value = 'LTC'
+        }else if (newApiBase.indexOf('/testnet/')<0) {
+          network.value = 'BTC'
+        }
+      });
+
+      // --- 计算属性 (无变化) ---
+      const activeNetwork = computed(() => bitcoinNetworks[network.value]);
+      const selectedUtxos = computed(() => utxos.value.filter(u => u.selected));
+      const inputTotal = computed(() => selectedUtxos.value.reduce((sum, u) => sum + u.value, 0));
+      const utxoCount = computed(() => selectedUtxos.value.length);
+      const validOutputs = computed(() => outputs.filter(o => o.address && o.value > 0));
+      const outputTotal = computed(() => validOutputs.value.reduce((sum, o) => sum + o.value, 0));
+	  const satUnit = computed(() => apiInfo.value[apiBase.value].sat);
+      const vbytes = computed(() => {
+        const nIn = utxoCount.value;
+        const nOut = validOutputs.value.length;
+        if (nIn === 0) return 0;
+		return Math.round(10 + nIn * 68 + nOut * 31)
+      });
+	  
+      const feeAmount = computed(() => {
+        const total = inputTotal.value - outputTotal.value;
+        return (total < 0) ? 0 : total;
+      });
+      const feeRate = computed(() => {
+        if (vbytes.value === 0) return 0;
+        return (feeAmount.value / vbytes.value).toFixed(8);
+      });
+
+      // --- 方法 ---
+      const addOutput = () => outputs.push({ address: '', value: null });
+      const removeOutput = (index) => {
+        if (outputs.length > 1) {
+          outputs.splice(index, 1);
+        }
+      };
+
+      const fetchUTXOs = async () => {
+        psbtHex.value = '';
+        buildStatus.value = '';
+        isFetching.value = true;
+        utxoStatus.value = t.value('fetching');
+        utxos.value = [];
+
+        try {
+          const addrs = addrList.value.split(/\s+/).map(s => s.trim()).filter(Boolean);
+          //if (addrs.length === 0) throw new Error(t.value('error_atLeastOneAddress'));
+
+          utxoStatus.value = t.value('status_usingApi', { api: apiBase.value });
+          let allUtxos = [];
+
+          for (const addr of addrs) {
+            const utxosData = await fetchJson(`${apiBase.value}/address/${addr}/utxo`);
+			utxosData.sort((a, b) => a.value - b.value);
+
+            for (const u of utxosData) {
+			  allUtxos.push(Object.assign(u,{address: addr,selected: true}));
+            }
+          }
+		  
+		  //
+		  if(rbfTxidList.value.length>1){//测试时用1
+			const txids = rbfTxidList.value.split(/\s+/).map(s => s.trim()).filter(Boolean);
+			
+			for(const txid of txids){
+				//
+				const txData = await fetchJson(`${apiBase.value}/tx/`+txid);
+				if(txData.status.confirmed)console.error('RBF Failed due to confirmed TX :',txid)
+				else
+				 for(const uu of txData.vin){//
+					allUtxos.push({txid:uu.txid,vout:uu.vout, value:uu.prevout.value, address:uu.prevout.scriptpubkey_address,status:txData.status,selected:true })
+				 }
+			}
+			
+		  }
+		  
+		  //合并、整理、排序
+		  utxos.value = Array.from(
+		    new Map(allUtxos.map(item => [`${item.txid}-${item.vout}`, item])).values()
+		  ).sort((a, b) =>{
+			if(a.status.confirmed != b.status.confirmed) return a.status.confirmed - b.status.confirmed;
+			return a.value - b.value;
+		  });
+		  
+          utxoStatus.value = t.value('status_utxoFound', { count: utxos.value.length });
+        } catch (e) {
+          console.error(e);
+          utxoStatus.value = `${t.value('error_prefix')}${e.message}`;
+          utxos.value = [];
+        } finally {
+          isFetching.value = false;
+        }
+		
+		fetchMinFeeRate();
+      };
+
+      const buildPSBT = async () => {
+        isBuilding.value = true;
+        buildStatus.value = '';
+        psbtHex.value = '';
+
+        try {
+          if (utxoCount.value === 0) throw new Error(t.value('error_noUtxoSelected'));
+          if (validOutputs.value.length === 0) throw new Error(t.value('error_noValidOutput'));
+          if (inputTotal.value <= outputTotal.value) {
+            throw new Error(t.value('error_inputLteOutput'));
+          }
+
+          const psbt = new bitcoin.Psbt({ network: activeNetwork.value });
+		  /////////////////raw格式base64生成
+			const tx = new bitcoin.Transaction()
+
+			tx.version = 2
+
+			selectedUtxos.value.forEach(u => {
+			  tx.addInput(
+				//Buffer.from(u.txid, 'hex').reverse()
+				hexToBytes(u.txid).reverse()
+				,u.vout,
+				0xfffffffd
+			  )
+			})
+
+			validOutputs.value.forEach(o => {
+			  const script = bitcoin.address.toOutputScript(o.address, activeNetwork.value)
+			  tx.addOutput(script, BigInt(o.value))
+			})
+
+			rawHex.value=tx.toHex()
+		  //////////////////////////////
+          for (const u of selectedUtxos.value) {
+            if (!u.prevTxHex) {
+              buildStatus.value = t.value('status_fetchingTx', { txid: u.txid });
+              u.prevTxHex = await getTxHex(u.txid);
+            }
+			
+            const prevTx = bitcoin.Transaction.fromHex(u.prevTxHex);
+			
+            const prevOut = prevTx.outs[u.vout];
+			
+			const isWitness = addressWitness[getAddressType(u.address)]
+
+            const input = { hash: u.txid, index: u.vout, sequence: 0xfffffffd };
+			
+            if (isWitness) {
+              input.witnessUtxo = { script: prevOut.script, value: prevOut.value };
+            } else {
+              //input.nonWitnessUtxo = Buffer.from(u.prevTxHex, 'hex');
+			  input.nonWitnessUtxo = hexToBytes(u.prevTxHex)
+            }
+			
+            psbt.addInput(input);
+          }
+
+          validOutputs.value.forEach(o => psbt.addOutput({ address: o.address, value: BigInt(o.value) }));
+
+          psbtHex.value = psbt.toHex();//For one click to mempool.space/tx/preview#tx=... 
+		  psbtBase64.value=psbt.toBase64();//Shorter text length format for sign wallet 
+        } catch (e) {
+          console.error(e);
+          buildStatus.value = `${t.value('error_prefix')}${e.message}`;
+        } finally {
+          isBuilding.value = false;
+        }
+      };
+
+      // --- Helper Functions (无变化) ---
+      const fetchJson = async (url) => {
+        const r = await fetch(url);
+        if (!r.ok) throw new Error(`HTTP ${r.status} ${r.statusText}`);
+        return r.json();
+      };
+
+      const getTxHex = async (txid) => {
+        const r = await fetch(`${apiBase.value}/tx/${txid}/raw`);
+        if (!r.ok) throw new Error(`HTTP ${r.status} ${r.statusText}`);
+        const buffer = await r.arrayBuffer();
+        return [...new Uint8Array(buffer)].map(b => b.toString(16).padStart(2, '0')).join('');
+      };
+	  const fetchMinFeeRate = async () => {//获取内存池最低手续费
+        const r = await fetchJson(apiBase.value+'/mempool');
+		try{ minFeeRate.value=r.fee_histogram[r.fee_histogram.length-1][0] }catch(ee){console.error(ee)}
+      };
+	  const openLink=(url)=>{ window.open(url) };
+
+      // --- Expose to template ---
+      return {
+        // i18n
+        t,
+        currentLang,
+        // original
+        network, activeNetwork, apiBase, addrList, utxos, forceFetch2Rbf, outputs, psbtHex,psbtBase64,rawHex,
+        isFetching, utxoStatus, isBuilding, buildStatus, inputTotal, utxoCount, outputTotal,
+        feeRate, feeAmount, addOutput, removeOutput, fetchUTXOs, buildPSBT, minFeeRate,
+        fetchMinFeeRate, vbytes, openLink,apiInfo,rbfTxidList
+      };
+    }
+  };
+
+  createApp(App).mount('#app');
+  
+</script>
+
+</body>
+</html>
